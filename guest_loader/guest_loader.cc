@@ -56,6 +56,7 @@
 #include "native_bridge_support/linker/static_tls_config.h"
 
 #include "private/CFIShadow.h"  // kLibraryAlignment
+#include "private/bionic_tls.h"  // __get_tls, TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE
 
 #include "app_process.h"
 #include "guest_loader_impl.h"
@@ -205,6 +206,17 @@ void GetHostPthreadCallback(HostCode callee, ThreadState* state) {
   UNUSED(callee);
 
   auto&& [ret] = GuestReturnReference<decltype(pthread_self)>(state);
+  // region digitalis
+  // With glibc-host-thread-id-handoff, pthread_self() is glibc's struct pthread, not a bionic
+  // pthread_internal_t. The guest linker runs with this record until ConfigStaticTls switches the
+  // main thread to the one the host seeded in TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE (see
+  // GuestThread::InitStaticTls). Hand out that record here as well, so both phases share one
+  // thread identity (e.g. the owner tid of the linker's recursive g_dl_mutex).
+  if (IsConfigFlagSet(kGlibcHostThreadIdHandoff)) {
+    ret = reinterpret_cast<pthread_t>(__get_tls()[TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE]);
+    return;
+  }
+  // endregion
   ret = pthread_self();
 }
 
