@@ -526,7 +526,9 @@ void GuestLoader::StartGuestMainThread() {
 }
 
 std::filesystem::path GetSystemPath(const char* subdir, const char* relative_path) {
-  std::filesystem::path result("/system");
+  // region digitalis
+  std::filesystem::path result(std::string(GetSystemRoot()) + "/system");
+  // endregion
   result.append(subdir);
   // Prefer alternative location if exists.
   std::filesystem::path alt_result = result / "berberis";

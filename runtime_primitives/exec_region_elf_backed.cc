@@ -21,7 +21,10 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 
+#include <string>
+
 #include "berberis/base/bit_util.h"
+#include "berberis/base/config_globals.h"
 #include "berberis/base/fd.h"
 #include "berberis/base/mmap.h"
 
@@ -32,6 +35,14 @@ const constexpr char* kExecRegionLibraryPath = "/system/lib64/libberberis_exec_r
 #else
 const constexpr char* kExecRegionLibraryPath = "/system/lib/libberberis_exec_region.so";
 #endif
+
+// region digitalis
+// The library lives in the translator's system tree, which a host may keep outside /system.
+const std::string& ExecRegionLibraryPath() {
+  static const std::string path = std::string(berberis::GetSystemRoot()) + kExecRegionLibraryPath;
+  return path;
+}
+// endregion
 
 const constexpr char* kRegionStartSymbolName = "exec_region_start";
 const constexpr char* kRegionEndSymbolName = "exec_region_end";
@@ -46,7 +57,7 @@ ExecRegion ExecRegionElfBackedFactory::Create(size_t size) {
   // region digitalis
   // Reserve from the selected code pool before directing the Android loader to use it.
   // endregion
-  size_t load_size = TinyLoader::CalculateLoadSize(kExecRegionLibraryPath, nullptr);
+  size_t load_size = TinyLoader::CalculateLoadSize(ExecRegionLibraryPath().c_str(), nullptr);
   CHECK_NE(load_size, 0);
 
   void* load_addr = MmapImplOrDie({.addr = nullptr,
@@ -62,9 +73,9 @@ ExecRegion ExecRegionElfBackedFactory::Create(size_t size) {
                               .reserved_addr = load_addr,
                               .reserved_size = load_size};
 
-  void* handle = android_dlopen_ext(kExecRegionLibraryPath, RTLD_NOW, &dlextinfo);
+  void* handle = android_dlopen_ext(ExecRegionLibraryPath().c_str(), RTLD_NOW, &dlextinfo);
   if (handle == nullptr) {
-    FATAL("Couldn't load \"%s\": %s", kExecRegionLibraryPath, dlerror());
+    FATAL("Couldn't load \"%s\": %s", ExecRegionLibraryPath().c_str(), dlerror());
   }
   void* region_start = dlsym(handle, kRegionStartSymbolName);
   CHECK(region_start != nullptr);

@@ -30,6 +30,7 @@
 #include "berberis/guest_state/guest_state.h"
 #include "berberis/instrument/syscall.h"
 #include "berberis/kernel_api/main_executable_real_path_emulation.h"
+#include "berberis/kernel_api/open_emulation.h"  // TryRedirectToSystemRoot
 #include "berberis/kernel_api/runtime_bridge.h"
 #include "berberis/kernel_api/syscall_emulation_common.h"
 
@@ -51,6 +52,11 @@ int FstatatForGuest(int dirfd, const char* path, struct stat* buf, int flags) {
   if ((flags & AT_SYMLINK_NOFOLLOW) == 0) {
     real_path = TryReadLinkToMainExecutableRealPath(path);
   }
+  // region digitalis
+  if (real_path == nullptr) {
+    real_path = TryRedirectToSystemRoot(path);
+  }
+  // endregion
   return syscall(__NR_newfstatat, dirfd, real_path ? real_path : path, buf, flags);
 }
 

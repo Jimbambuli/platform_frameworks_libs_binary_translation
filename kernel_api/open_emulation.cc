@@ -34,6 +34,7 @@
 #include "berberis/base/arena_string.h"
 #include "berberis/base/arena_vector.h"
 #include "berberis/base/checks.h"
+#include "berberis/base/config_globals.h"
 #include "berberis/base/fd.h"
 #include "berberis/base/forever_alloc.h"
 #include "berberis/base/tracing.h"
@@ -172,9 +173,10 @@ int OpenatProcSelfMapsForGuest(int dirfd, int flags, mode_t mode) {
     {
       static constexpr char kGuestArm64LinkerPath[] = "/system/bin/arm64/linker64";
       static constexpr char kCanonicalLinkerPath[] = "/apex/com.android.runtime/bin/linker64";
-      size_t gpos = cur_line.find(kGuestArm64LinkerPath);
+      static const std::string guest_linker = std::string(GetSystemRoot()) + kGuestArm64LinkerPath;
+      size_t gpos = cur_line.find(guest_linker.c_str());
       if (gpos != ArenaString::npos) {
-        cur_line.replace(gpos, sizeof(kGuestArm64LinkerPath) - 1, kCanonicalLinkerPath);
+        cur_line.replace(gpos, guest_linker.size(), kCanonicalLinkerPath);
       } else if (cur_line.find(kCanonicalLinkerPath) != ArenaString::npos) {
         // Host x86_64 linker — hide it from the guest's view.
         continue;
@@ -310,6 +312,12 @@ void CloseEmulatedProcSelfMapsFileDescriptor(int fd) {
 #if defined(NATIVE_BRIDGE_GUEST_ARCH_ARM64)
 inline constexpr char kSystemArm64LibcxxPath[] = "/system/lib64/arm64/libc++.so";
 
+// The system tree may live under a root other than / (GetSystemRoot()).
+const char* SystemArm64LibcxxPath() {
+  static const std::string path = std::string(GetSystemRoot()) + kSystemArm64LibcxxPath;
+  return path.c_str();
+}
+
 // An app can ship the NDK's libc++.so, which is a GNU-ld linker script
 // ("INPUT(-landroid_support -lc++_shared)"), not an ELF. The guest linker cannot
 // parse it and aborts the dlopen ("too small to be an ELF executable"). Because
@@ -330,7 +338,7 @@ const char* TryRedirectNdkLibcxxLinkerScript(const char* path) {
   if (len < kSuffixLen || strcmp(path + len - kSuffixLen, kSuffix) != 0) {
     return nullptr;
   }
-  if (strcmp(path, kSystemArm64LibcxxPath) == 0) {
+  if (strcmp(path, SystemArm64LibcxxPath()) == 0) {
     return nullptr;  // already the real system copy
   }
   int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -346,8 +354,8 @@ const char* TryRedirectNdkLibcxxLinkerScript(const char* path) {
   }
   // Non-ELF (the NDK GNU-ld linker script): redirect to the real system libc++.so.
   TRACE("openat: redirecting NDK libc++.so linker script \"%s\" to %s", path,
-        kSystemArm64LibcxxPath);
-  return kSystemArm64LibcxxPath;
+        SystemArm64LibcxxPath());
+  return SystemArm64LibcxxPath();
 }
 
 inline constexpr char kGuestLinker64SelfPath[] = "/system/bin/linker64";
@@ -371,10 +379,23 @@ const char* TryRedirectGuestLinker64(const char* path) {
   if (path == nullptr || strcmp(path, kGuestLinker64SelfPath) != 0) {
     return nullptr;
   }
-  TRACE("openat: redirecting guest linker \"%s\" to %s", path, kGuestLinker64RealPath);
-  return kGuestLinker64RealPath;
+  static const std::string real_path = std::string(GetSystemRoot()) + kGuestLinker64RealPath;
+  TRACE("openat: redirecting guest linker \"%s\" to %s", path, real_path.c_str());
+  return real_path.c_str();
 }
 #endif  // NATIVE_BRIDGE_GUEST_ARCH_ARM64
+// endregion
+
+// region digitalis
+const char* TryRedirectToSystemRoot(const char* path) {
+  const char* root = GetSystemRoot();
+  if (path == nullptr || root[0] == '\0' || strncmp(path, "/system/", 8) != 0) {
+    return nullptr;
+  }
+  thread_local std::string redirected;
+  redirected = std::string(root) + path;
+  return redirected.c_str();
+}
 // endregion
 
 int OpenatForGuest(int dirfd, const char* path, int guest_flags, mode_t mode) {
@@ -411,6 +432,12 @@ int OpenatForGuest(int dirfd, const char* path, int guest_flags, mode_t mode) {
     return OpenatProcCpuinfoForGuest(dirfd, host_flags, mode);
   }
 #endif
+  // endregion
+
+  // region digitalis
+  if (real_path == nullptr) {
+    real_path = TryRedirectToSystemRoot(path);
+  }
   // endregion
 
   return openat(dirfd, real_path != nullptr ? real_path : path, host_flags, mode);

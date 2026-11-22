@@ -228,6 +228,13 @@ const char* GetTranslationModeConfig() {
   return var.get();
 }
 
+// region digitalis
+const char* GetSystemRoot() {
+  static ConfigStr var("BERBERIS_SYSTEM_ROOT", "ro.berberis.system_root");
+  return var.get() != nullptr ? var.get() : "";
+}
+// endregion
+
 const char* GetProfilingConfig() {
   static ConfigStr var("BERBERIS_PROFILING", "berberis.profiling");
   return var.get();

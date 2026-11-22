@@ -46,6 +46,13 @@ const char* GetTracingConfig();
 const char* GetTranslationModeConfig();
 
 const char* GetProfilingConfig();
+// region digitalis
+// Directory that holds the translator's system tree (<root>/system/lib64/..., <root>/system/bin/arm64,
+// <root>/system/etc). Empty (the default, as on Android): the tree is /system. A host that cannot
+// install into /system (a glibc host shipping Digitalis inside an application bundle) sets
+// BERBERIS_SYSTEM_ROOT or ro.berberis.system_root.
+const char* GetSystemRoot();
+// endregion
 
 uintptr_t GetEntryPointOverride();
 

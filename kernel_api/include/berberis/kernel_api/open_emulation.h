@@ -38,6 +38,13 @@ int OpenatForGuest(int dirfd, const char* pathname, int flags, mode_t mode);
 int OpenForGuest(const char* pathname, int flags, mode_t mode);
 
 bool IsFileDescriptorEmulatedProcSelfMaps(int fd);
+
+// region digitalis
+// With a system root (GetSystemRoot()), the guest's /system is <root>/system: a guest path under
+// /system/ is returned with the root in front, any other path as nullptr. The returned string lives
+// until the thread's next call.
+const char* TryRedirectToSystemRoot(const char* path);
+// endregion
 void CloseEmulatedProcSelfMapsFileDescriptor(int fd);
 
 extern const char* kGuestCpuinfoPath;
