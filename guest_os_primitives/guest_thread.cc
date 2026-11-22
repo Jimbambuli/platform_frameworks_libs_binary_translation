@@ -277,6 +277,15 @@ void GuestThread::Destroy(GuestThread* thread) {
     MunmapOrDie(thread->scs_region_, SCS_GUARD_REGION_SIZE);
   }
   // region digitalis
+  // InitStaticTls left this thread's state in TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE. A later GuestThread
+  // of the same host thread (e.g. one attached for a signal handler or a pthread key destructor)
+  // must not take that freed state for a record the host seeded.
+  if (IsConfigFlagSet(kGlibcHostThreadIdHandoff) && thread->state_ != nullptr) {
+    void*& slot = GetTls()[TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE];
+    if (slot == GetThreadStateStorage(*thread->state_)) {
+      slot = nullptr;
+    }
+  }
   if (thread->host_pthread_record_ != nullptr) {
     auto* record = static_cast<pthread_internal_t*>(thread->host_pthread_record_);
     if (thread->own_host_pthread_record_) {
