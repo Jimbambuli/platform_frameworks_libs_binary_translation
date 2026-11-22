@@ -36,7 +36,12 @@
 
 #if defined(__x86_64__)
 
+#include <pthread.h>
+
 #include "berberis/guest_abi/function_wrappers.h"
+#include "berberis/guest_abi/guest_params.h"
+#include "berberis/guest_os_primitives/guest_thread_manager.h"  // ToHostPthread
+#include "berberis/guest_state/guest_state.h"
 #include "berberis/proxy_loader/proxy_library_builder.h"
 
 #include "register_extra_trampolines.h"
@@ -122,6 +127,46 @@ const KnownTrampoline kDigitalisExtraLibcTrampolines[] = {
 };
 
 REGISTER_DIGITALIS_EXTRA_TRAMPOLINES("libc.so", kDigitalisExtraLibcTrampolines)
+
+// With glibc-host-thread-id-handoff the guest's pthread_t is its bionic record, not the host's
+// pthread_t (GuestThread::GetGlibcHostPthreadRecord). Upstream passes it to the host as it is,
+// which AOSP can do because there both are the same. The functions below take the pthread_t in x0:
+// give the host its own pthread_t, then run the upstream trampoline.
+void DoHostPthreadArg(HostCode callee, ThreadState* state) {
+  const auto* chain = static_cast<const ChainedTrampoline*>(callee);
+  state->cpu.x[0] = ToHostPthread(static_cast<pthread_t>(state->cpu.x[0]));
+  chain->marshal_and_call(chain->thunk, state);
+}
+
+// pthread_join, pthread_detach: in addition, the record goes once the host joined or detached the
+// thread and it has exited.
+void DoHostPthreadArgAndRelease(HostCode callee, ThreadState* state) {
+  const auto* chain = static_cast<const ChainedTrampoline*>(callee);
+  auto guest_thread = static_cast<pthread_t>(state->cpu.x[0]);
+  state->cpu.x[0] = ToHostPthread(guest_thread);
+  chain->marshal_and_call(chain->thunk, state);
+  auto&& [ret] = GuestReturnReference<int(pthread_t)>(state);
+  if (ret == 0) {
+    ReleaseGuestPthread(guest_thread);
+  }
+}
+
+const KnownTrampoline kDigitalisLibcPthreadOverrides[] = {
+    {"pthread_detach", DoHostPthreadArgAndRelease, nullptr},
+    {"pthread_getattr_np", DoHostPthreadArg, nullptr},
+    {"pthread_getcpuclockid", DoHostPthreadArg, nullptr},
+    {"pthread_getname_np", DoHostPthreadArg, nullptr},
+    {"pthread_getschedparam", DoHostPthreadArg, nullptr},
+    {"pthread_gettid_np", DoHostPthreadArg, nullptr},
+    {"pthread_join", DoHostPthreadArgAndRelease, nullptr},
+    {"pthread_kill", DoHostPthreadArg, nullptr},
+    {"pthread_setname_np", DoHostPthreadArg, nullptr},
+    {"pthread_setschedparam", DoHostPthreadArg, nullptr},
+    {"pthread_setschedprio", DoHostPthreadArg, nullptr},
+    {"pthread_sigqueue", DoHostPthreadArg, nullptr},
+};
+
+REGISTER_DIGITALIS_EXTRA_TRAMPOLINE_OVERRIDES("libc.so", kDigitalisLibcPthreadOverrides)
 
 }  // namespace
 }  // namespace berberis

@@ -17,6 +17,8 @@
 #ifndef BERBERIS_GUEST_OS_PRIMITIVES_GUEST_THREAD_MANAGER_H_
 #define BERBERIS_GUEST_OS_PRIMITIVES_GUEST_THREAD_MANAGER_H_
 
+#include <pthread.h>  // pthread_t
+
 #include "berberis/guest_os_primitives/guest_thread.h"
 
 namespace berberis {
@@ -37,6 +39,14 @@ void ExitCurrentThread(int status);
 
 // Ensure guest threads don't run obsolete code.
 void FlushGuestCodeCache();
+
+// region digitalis
+// With glibc-host-thread-id-handoff: the host pthread_t of a guest pthread_t (the thread's record,
+// see GuestThread::GetGlibcHostPthreadRecord). Other values come back unchanged.
+pthread_t ToHostPthread(pthread_t guest_thread);
+// The host has joined or detached guest_thread: its record may go once the thread has exited.
+void ReleaseGuestPthread(pthread_t guest_thread);
+// endregion
 
 }  // namespace berberis
 

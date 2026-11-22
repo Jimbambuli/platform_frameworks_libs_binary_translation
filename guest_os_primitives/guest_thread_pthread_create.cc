@@ -19,6 +19,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 
+#include "berberis/base/config_globals.h"
 #include "berberis/guest_state/guest_addr.h"
 
 #include "guest_thread_pthread_create.h"
@@ -41,6 +42,17 @@ int CreateNewGuestThread(pthread_t* thread_id,
   info.func = func;
   info.arg = arg;
   sem_init(&info.sem, 0, 0);
+  // region digitalis
+  if (IsConfigFlagSet(kGlibcHostThreadIdHandoff)) {
+    int detach_state = PTHREAD_CREATE_JOINABLE;
+    if (attr != nullptr) {
+      pthread_attr_getdetachstate(attr, &detach_state);
+    }
+    if (detach_state == PTHREAD_CREATE_JOINABLE) {
+      info.thread->SetJoinableGuestPthread();
+    }
+  }
+  // endregion
 
   int res;
   {
@@ -49,6 +61,12 @@ int CreateNewGuestThread(pthread_t* thread_id,
     res = pthread_create(thread_id, attr, RunGuestThread, &info);
     if (res == 0) {
       CHECK_EQ(0, sem_wait(&info.sem));  // Wait with blocked signals to avoid EINTR.
+      // region digitalis
+      // The guest's pthread_t is the record that pthread_self() returns in the new thread.
+      if (IsConfigFlagSet(kGlibcHostThreadIdHandoff)) {
+        *thread_id = reinterpret_cast<pthread_t>(info.guest_pthread);
+      }
+      // endregion
     }
   }
 

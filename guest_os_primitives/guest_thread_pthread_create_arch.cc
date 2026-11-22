@@ -18,6 +18,7 @@
 #include <semaphore.h>
 
 #include "berberis/base/checks.h"
+#include "berberis/base/config_globals.h"
 #include "berberis/base/host_signal.h"  // RTSigprocmaskSyscallOrDie
 #include "berberis/guest_abi/guest_call.h"
 
@@ -33,6 +34,11 @@ void* RunGuestThread(void* arg) {
   // Might handle destruction in pthread_join/pthread_exit instead, but seems more complex.
   InsertCurrentThread(info->thread, true);
   info->thread->InitStaticTls();
+  // region digitalis
+  if (IsConfigFlagSet(kGlibcHostThreadIdHandoff)) {
+    info->guest_pthread = info->thread->GetGlibcHostPthreadRecord();
+  }
+  // endregion
 
   // Caller will destroy info after we notify it, so save thread function locally.
   GuestAddr guest_func = info->func;

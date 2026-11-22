@@ -72,11 +72,16 @@ class GuestThread {
 
   // region digitalis
   // With glibc-host-thread-id-handoff: the bionic pthread record of this host thread, which the
-  // guest gets in its TLS_SLOT_THREAD_ID. Taken from TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE if the host
-  // seeded one there; otherwise this thread gets a zeroed pthread_internal_t with its tid and its
-  // own bionic_tls, as bionic gives each of its threads, and the record is freed with the thread.
-  // Host threads that the bionic layer does not create (e.g. glibc's pthread_create) need this.
+  // guest gets in its TLS_SLOT_THREAD_ID and so as its pthread_t. Taken from
+  // TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE if the host seeded one there; otherwise this thread gets a
+  // zeroed pthread_internal_t with its tid and its own bionic_tls, as bionic gives each of its
+  // threads. Host threads that the bionic layer does not create (e.g. glibc's pthread_create) need
+  // this. Call it on the current thread. The record maps to the host pthread_t (ToHostPthread) and
+  // lives as long as that does: until the thread exits, or for a joinable guest pthread until the
+  // guest joins or detaches it.
   void* GetGlibcHostPthreadRecord();
+  // The guest created this thread joinable (pthread_create); call before the thread starts.
+  void SetJoinableGuestPthread() { joinable_guest_pthread_ = true; }
   // endregion
 
   void ProcessPendingSignals();
@@ -143,8 +148,10 @@ class GuestThread {
   // Shadow call stack.
   void* scs_region_ = nullptr;
   // region digitalis
-  // The pthread record GetGlibcHostPthreadRecord() created for this thread, if any.
-  void* own_host_pthread_record_ = nullptr;
+  // The pthread record of GetGlibcHostPthreadRecord(), if any, and whether it created the record.
+  void* host_pthread_record_ = nullptr;
+  bool own_host_pthread_record_ = false;
+  bool joinable_guest_pthread_ = false;
   // endregion
   GuestAddr scs_base_ = {};
 

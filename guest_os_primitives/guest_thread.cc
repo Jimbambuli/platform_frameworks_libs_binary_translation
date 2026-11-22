@@ -17,6 +17,10 @@
 #include "berberis/guest_os_primitives/guest_thread.h"
 
 #include <sys/mman.h>  // mprotect
+// region digitalis
+#include <pthread.h>
+#include <mutex>
+// endregion
 
 #if defined(__BIONIC__)
 #include "private/bionic_constants.h"
@@ -29,6 +33,11 @@
 
 #include "berberis/base/checks.h"
 #include "berberis/base/config_globals.h"
+// region digitalis
+#include "berberis/base/forever_alloc.h"
+#include "berberis/base/forever_map.h"
+#include "berberis/guest_os_primitives/guest_thread_manager.h"  // ToHostPthread
+// endregion
 #include "berberis/base/mmap.h"
 #include "berberis/base/tracing.h"
 #include "berberis/guest_state/guest_addr.h"  // ToGuestAddr
@@ -152,6 +161,87 @@ GuestThread* GuestThread::CreatePthread(void* stack, size_t stack_size, size_t g
   return thread;
 }
 
+// region digitalis
+#if defined(__BIONIC__)
+namespace {
+
+// With glibc-host-thread-id-handoff the guest's pthread_t is the record of
+// GuestThread::GetGlibcHostPthreadRecord(), not the host's pthread_t; the libc trampolines hand the
+// host its own (ToHostPthread). Like a host pthread_t, the record of a joinable guest pthread stays
+// valid after the thread exits, until the guest joins or detaches it.
+struct GlibcHostPthread {
+  pthread_t host;
+  bool own;       // GetGlibcHostPthreadRecord mapped the record
+  bool exited;    // the GuestThread is destroyed
+  bool released;  // joined, detached, or not created joinable by the guest
+};
+
+using GlibcHostPthreadMap = ForeverMap<void*, GlibcHostPthread>;
+
+std::mutex g_glibc_host_pthreads_mutex;
+
+GlibcHostPthreadMap& GlibcHostPthreads() {
+  static auto* g_glibc_host_pthreads = NewForever<GlibcHostPthreadMap>();
+  return *g_glibc_host_pthreads;
+}
+
+// Caller holds g_glibc_host_pthreads_mutex.
+void EraseIfUnused(GlibcHostPthreadMap::iterator it) {
+  if (!it->second.exited || !it->second.released) {
+    return;
+  }
+  if (it->second.own) {
+    MunmapOrDie(it->first, AlignUpPageSize(sizeof(pthread_internal_t)));
+  }
+  GlibcHostPthreads().erase(it);
+}
+
+void AddGlibcHostPthread(void* record, pthread_t host, bool own, bool joinable) {
+  std::lock_guard<std::mutex> lock(g_glibc_host_pthreads_mutex);
+  GlibcHostPthreads()[record] = {host, own, false, !joinable};
+}
+
+void GlibcHostPthreadExited(void* record) {
+  std::lock_guard<std::mutex> lock(g_glibc_host_pthreads_mutex);
+  auto it = GlibcHostPthreads().find(record);
+  if (it != GlibcHostPthreads().end()) {
+    it->second.exited = true;
+    EraseIfUnused(it);
+  }
+}
+
+}  // namespace
+#endif  // defined(__BIONIC__)
+
+pthread_t ToHostPthread(pthread_t guest_thread) {
+#if defined(__BIONIC__)
+  if (IsConfigFlagSet(kGlibcHostThreadIdHandoff)) {
+    std::lock_guard<std::mutex> lock(g_glibc_host_pthreads_mutex);
+    auto it = GlibcHostPthreads().find(reinterpret_cast<void*>(guest_thread));
+    if (it != GlibcHostPthreads().end()) {
+      return it->second.host;
+    }
+  }
+#endif
+  return guest_thread;
+}
+
+void ReleaseGuestPthread(pthread_t guest_thread) {
+#if defined(__BIONIC__)
+  if (IsConfigFlagSet(kGlibcHostThreadIdHandoff)) {
+    std::lock_guard<std::mutex> lock(g_glibc_host_pthreads_mutex);
+    auto it = GlibcHostPthreads().find(reinterpret_cast<void*>(guest_thread));
+    if (it != GlibcHostPthreads().end()) {
+      it->second.released = true;
+      EraseIfUnused(it);
+    }
+  }
+#else
+  (void)guest_thread;
+#endif
+}
+// endregion
+
 // static
 GuestThread* GuestThread::CreateForTest(ThreadState* state) {
   void* thread_storage = Mmap(kGuestThreadPageAlignedSize);
@@ -187,10 +277,12 @@ void GuestThread::Destroy(GuestThread* thread) {
     MunmapOrDie(thread->scs_region_, SCS_GUARD_REGION_SIZE);
   }
   // region digitalis
-  if (thread->own_host_pthread_record_ != nullptr) {
-    auto* record = static_cast<pthread_internal_t*>(thread->own_host_pthread_record_);
-    MunmapOrDie(record->bionic_tls, AlignUpPageSize(sizeof(bionic_tls)));
-    MunmapOrDie(record, AlignUpPageSize(sizeof(pthread_internal_t)));
+  if (thread->host_pthread_record_ != nullptr) {
+    auto* record = static_cast<pthread_internal_t*>(thread->host_pthread_record_);
+    if (thread->own_host_pthread_record_) {
+      MunmapOrDie(record->bionic_tls, AlignUpPageSize(sizeof(bionic_tls)));
+    }
+    GlibcHostPthreadExited(record);
   }
   // endregion
 #endif  // defined(__BIONIC__)
@@ -398,17 +490,22 @@ void GuestThread::InitStaticTls() {
 // region digitalis
 void* GuestThread::GetGlibcHostPthreadRecord() {
 #if defined(__BIONIC__)
-  void*& slot = GetTls()[TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE];
-  if (slot == nullptr) {
-    auto* record = static_cast<pthread_internal_t*>(
-        MmapOrDie(AlignUpPageSize(sizeof(pthread_internal_t))));
-    record->tid = GettidSyscall();
-    record->bionic_tls =
-        static_cast<bionic_tls*>(MmapOrDie(AlignUpPageSize(sizeof(bionic_tls))));
-    own_host_pthread_record_ = record;
-    slot = record;
+  // InitStaticTls replaces the slot with the thread state, so keep the record here.
+  if (host_pthread_record_ == nullptr) {
+    void* record = GetTls()[TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE];
+    own_host_pthread_record_ = record == nullptr;
+    if (own_host_pthread_record_) {
+      auto* new_record = static_cast<pthread_internal_t*>(
+          MmapOrDie(AlignUpPageSize(sizeof(pthread_internal_t))));
+      new_record->tid = GettidSyscall();
+      new_record->bionic_tls =
+          static_cast<bionic_tls*>(MmapOrDie(AlignUpPageSize(sizeof(bionic_tls))));
+      record = new_record;
+    }
+    host_pthread_record_ = record;
+    AddGlibcHostPthread(record, pthread_self(), own_host_pthread_record_, joinable_guest_pthread_);
   }
-  return slot;
+  return host_pthread_record_;
 #else
   return nullptr;
 #endif

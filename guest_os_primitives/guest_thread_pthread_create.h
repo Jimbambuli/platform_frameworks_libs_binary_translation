@@ -31,6 +31,10 @@ struct GuestThreadCreateInfo {
   GuestAddr func;
   GuestAddr arg;
   sem_t sem;
+  // region digitalis
+  // With glibc-host-thread-id-handoff: the new thread's pthread_t as the guest sees it.
+  void* guest_pthread;
+  // endregion
 };
 
 // Function that runs via pthread_create.
