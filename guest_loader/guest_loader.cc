@@ -209,11 +209,11 @@ void GetHostPthreadCallback(HostCode callee, ThreadState* state) {
   // region digitalis
   // With glibc-host-thread-id-handoff, pthread_self() is glibc's struct pthread, not a bionic
   // pthread_internal_t. The guest linker runs with this record until ConfigStaticTls switches the
-  // main thread to the one the host seeded in TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE (see
-  // GuestThread::InitStaticTls). Hand out that record here as well, so both phases share one
+  // main thread to the record in TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE (see
+  // GuestThread::GetGlibcHostPthreadRecord). Hand out that record here as well, so both phases share one
   // thread identity (e.g. the owner tid of the linker's recursive g_dl_mutex).
   if (IsConfigFlagSet(kGlibcHostThreadIdHandoff)) {
-    ret = reinterpret_cast<pthread_t>(__get_tls()[TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE]);
+    ret = reinterpret_cast<pthread_t>(state->thread->GetGlibcHostPthreadRecord());
     return;
   }
   // endregion

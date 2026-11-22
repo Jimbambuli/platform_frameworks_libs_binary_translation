@@ -77,9 +77,12 @@ enum ConfigFlag {
   // Read the host bionic pthread_internal_t* for a new guest thread from
   // TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE instead of TLS_SLOT_THREAD_ID. Set this
   // when the translator runs on a glibc host under a bionic compatibility
-  // layer: there %fs+0x08 (TLS_SLOT_THREAD_ID) is glibc's DTV pointer, so the
-  // host seeds a synthetic bionic pthread record in the guest-state slot and
-  // hands it over from there. Never set it on a real bionic host.
+  // layer: there %fs+0x08 (TLS_SLOT_THREAD_ID) is glibc's DTV pointer and
+  // %fs+0x48 (TLS_SLOT_BIONIC_TLS) is not a bionic_tls. The host may seed a
+  // bionic pthread record in the guest-state slot; for a thread without one,
+  // Berberis creates it (GuestThread::GetGlibcHostPthreadRecord). The guest's
+  // thread id and bionic_tls slots come from that record. Never set it on a
+  // real bionic host.
   kGlibcHostThreadIdHandoff,
   // endregion
   kNumConfigFlags

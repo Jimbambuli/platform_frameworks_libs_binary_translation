@@ -70,6 +70,15 @@ class GuestThread {
   // Configure static tls for *current* *main* guest thread.
   void ConfigStaticTls(const NativeBridgeStaticTlsConfig* config);
 
+  // region digitalis
+  // With glibc-host-thread-id-handoff: the bionic pthread record of this host thread, which the
+  // guest gets in its TLS_SLOT_THREAD_ID. Taken from TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE if the host
+  // seeded one there; otherwise this thread gets a zeroed pthread_internal_t with its tid and its
+  // own bionic_tls, as bionic gives each of its threads, and the record is freed with the thread.
+  // Host threads that the bionic layer does not create (e.g. glibc's pthread_create) need this.
+  void* GetGlibcHostPthreadRecord();
+  // endregion
+
   void ProcessPendingSignals();
 
   // Both return *previous* pending signals status (false: disabled, true: enabled).
@@ -133,6 +142,10 @@ class GuestThread {
 
   // Shadow call stack.
   void* scs_region_ = nullptr;
+  // region digitalis
+  // The pthread record GetGlibcHostPthreadRecord() created for this thread, if any.
+  void* own_host_pthread_record_ = nullptr;
+  // endregion
   GuestAddr scs_base_ = {};
 
   ThreadState* state_ = nullptr;

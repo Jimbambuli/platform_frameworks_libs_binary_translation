@@ -21,6 +21,10 @@
 #if defined(__BIONIC__)
 #include "private/bionic_constants.h"
 #include "private/bionic_tls.h"
+// region digitalis
+#include "bionic/pthread_internal.h"  // pthread_internal_t
+#include "berberis/base/gettid.h"
+// endregion
 #endif
 
 #include "berberis/base/checks.h"
@@ -182,6 +186,13 @@ void GuestThread::Destroy(GuestThread* thread) {
   if (thread->scs_region_ != nullptr) {
     MunmapOrDie(thread->scs_region_, SCS_GUARD_REGION_SIZE);
   }
+  // region digitalis
+  if (thread->own_host_pthread_record_ != nullptr) {
+    auto* record = static_cast<pthread_internal_t*>(thread->own_host_pthread_record_);
+    MunmapOrDie(record->bionic_tls, AlignUpPageSize(sizeof(bionic_tls)));
+    MunmapOrDie(record, AlignUpPageSize(sizeof(pthread_internal_t)));
+  }
+  // endregion
 #endif  // defined(__BIONIC__)
   if (thread->state_) {
     DestroyThreadState(thread->state_);
@@ -363,12 +374,18 @@ void GuestThread::InitStaticTls() {
   // pthread_internal_t*. Such a host seeds a synthetic bionic pthread record in
   // TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE; take the thread id from there and let
   // the store below replace it with the live GuestThread pointer.
-  const size_t host_thread_id_slot = IsConfigFlagSet(kGlibcHostThreadIdHandoff)
-                                         ? TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE
-                                         : TLS_SLOT_THREAD_ID;
-  tls[g_static_tls_config.tls_slot_thread_id] = GetTls()[host_thread_id_slot];
+  // The record's bionic_tls replaces the host's TLS_SLOT_BIONIC_TLS (%fs+0x48), which on glibc is
+  // not a bionic_tls either (feature_1, CET).
+  if (IsConfigFlagSet(kGlibcHostThreadIdHandoff)) {
+    auto* record = static_cast<pthread_internal_t*>(GetGlibcHostPthreadRecord());
+    tls[g_static_tls_config.tls_slot_thread_id] = record;
+    tls[g_static_tls_config.tls_slot_bionic_tls] =
+        record->bionic_tls != nullptr ? record->bionic_tls : GetTls()[TLS_SLOT_BIONIC_TLS];
+  } else {
+    tls[g_static_tls_config.tls_slot_thread_id] = GetTls()[TLS_SLOT_THREAD_ID];
+    tls[g_static_tls_config.tls_slot_bionic_tls] = GetTls()[TLS_SLOT_BIONIC_TLS];
+  }
   // endregion
-  tls[g_static_tls_config.tls_slot_bionic_tls] = GetTls()[TLS_SLOT_BIONIC_TLS];
   GetTls()[TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE] = GetThreadStateStorage(*state_);
   SetTlsAddr(*state_, ToGuestAddr(tls));
 #else
@@ -377,6 +394,26 @@ void GuestThread::InitStaticTls() {
   SetTlsAddr(*state_, GettidSyscall());
 #endif
 }
+
+// region digitalis
+void* GuestThread::GetGlibcHostPthreadRecord() {
+#if defined(__BIONIC__)
+  void*& slot = GetTls()[TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE];
+  if (slot == nullptr) {
+    auto* record = static_cast<pthread_internal_t*>(
+        MmapOrDie(AlignUpPageSize(sizeof(pthread_internal_t))));
+    record->tid = GettidSyscall();
+    record->bionic_tls =
+        static_cast<bionic_tls*>(MmapOrDie(AlignUpPageSize(sizeof(bionic_tls))));
+    own_host_pthread_record_ = record;
+    slot = record;
+  }
+  return slot;
+#else
+  return nullptr;
+#endif
+}
+// endregion
 
 void GuestThread::ConfigStaticTls(const NativeBridgeStaticTlsConfig* config) {
   // This function is called during Bionic linker initialization, before any
