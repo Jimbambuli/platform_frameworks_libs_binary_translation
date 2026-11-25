@@ -281,6 +281,9 @@ filegroup {
         "guest_map_shadow_test.cc",
         "guest_signal_action_test.cc",
         "guest_thread_test.cc",
+        // region digitalis
+        "guest_thread_manager_test.cc",
+        // endregion
     ],
 }
 

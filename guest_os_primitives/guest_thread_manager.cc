@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <limits.h>  // PTHREAD_DESTRUCTOR_ITERATIONS
 #include <pthread.h>
 #include <sys/types.h>  // pid_t
 #include <cstddef>      // size_t
@@ -37,10 +38,21 @@ namespace {
 
 GuestThreadExitListenerFn g_guest_thread_exit_listener = nullptr;
 
-void GuestThreadDtor(void* /* arg */) {
+void GuestThreadDtor(void* arg) {
   // TLS cache was cleared by pthread_exit.
-  // TODO(b/280671643): Postpone detach to last pthread destructor iteration.
-  // On previous iterations, simply restore TLS cache and return.
+  // region digitalis
+  // b/280671643: postpone detach to the last pthread destructor iteration. Guest key destructors
+  // of keys created after g_guest_thread_key run after this one in the same round, and they need
+  // this guest thread: its static TLS and, on glibc hosts, its pthread_t (Boehm GC in Unity's
+  // libil2cpp unregisters the thread under its pthread_self()). On previous iterations, simply
+  // restore TLS cache and return; the host libc calls us again while a key has a value, up to
+  // PTHREAD_DESTRUCTOR_ITERATIONS times (bionic and glibc: 4).
+  auto* thread = static_cast<GuestThread*>(arg);
+  if (thread->CountPthreadKeyDtorRound() < PTHREAD_DESTRUCTOR_ITERATIONS) {
+    CHECK_EQ(0, pthread_setspecific(g_guest_thread_key, thread));
+    return;
+  }
+  // endregion
   DetachCurrentThread();
 }
 

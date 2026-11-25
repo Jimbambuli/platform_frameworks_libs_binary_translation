@@ -19,6 +19,9 @@
 
 #include <csetjmp>  // jmp_buf
 #include <csignal>  // stack_t
+// region digitalis
+#include <cstdint>  // uint8_t
+// endregion
 #include <memory>
 
 #include "berberis/guest_state/guest_addr.h"
@@ -82,6 +85,8 @@ class GuestThread {
   void* GetGlibcHostPthreadRecord();
   // The guest created this thread joinable (pthread_create); call before the thread starts.
   void SetJoinableGuestPthread() { joinable_guest_pthread_ = true; }
+  // Counts the calls of the guest thread key destructor (GuestThreadDtor) and returns the count.
+  uint8_t CountPthreadKeyDtorRound() { return ++pthread_key_dtor_rounds_; }
   // endregion
 
   void ProcessPendingSignals();
@@ -152,6 +157,7 @@ class GuestThread {
   void* host_pthread_record_ = nullptr;
   bool own_host_pthread_record_ = false;
   bool joinable_guest_pthread_ = false;
+  uint8_t pthread_key_dtor_rounds_ = 0;
   // endregion
   GuestAddr scs_base_ = {};
 

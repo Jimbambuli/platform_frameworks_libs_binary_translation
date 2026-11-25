@@ -19,6 +19,10 @@
 #include <sys/mman.h>  // mprotect
 // region digitalis
 #include <pthread.h>
+#include <sys/syscall.h>  // __NR_tgkill
+#include <unistd.h>       // getpid, syscall
+#include <cerrno>
+#include <iterator>  // std::next
 #include <mutex>
 // endregion
 
@@ -169,10 +173,15 @@ namespace {
 // GuestThread::GetGlibcHostPthreadRecord(), not the host's pthread_t; the libc trampolines hand the
 // host its own (ToHostPthread). Like a host pthread_t, the record of a joinable guest pthread stays
 // valid after the thread exits, until the guest joins or detaches it.
+// A record that GetGlibcHostPthreadRecord mapped belongs to the host thread, as bionic's
+// pthread_internal_t does, not to one GuestThread: a host thread gets a new GuestThread whenever it
+// runs guest code again after a detach (signal handler, pthread key destructor), and its
+// pthread_self() must stay the same (Boehm GC looks threads up by it). So such a record stays
+// parked after its GuestThread goes and goes itself only once the host thread is gone.
 struct GlibcHostPthread {
   pthread_t host;
   bool own;       // GetGlibcHostPthreadRecord mapped the record
-  bool exited;    // the GuestThread is destroyed
+  bool exited;    // no GuestThread uses the record
   bool released;  // joined, detached, or not created joinable by the guest
 };
 
@@ -185,20 +194,54 @@ GlibcHostPthreadMap& GlibcHostPthreads() {
   return *g_glibc_host_pthreads;
 }
 
-// Caller holds g_glibc_host_pthreads_mutex.
-void EraseIfUnused(GlibcHostPthreadMap::iterator it) {
+// May run in a signal handler (AttachCurrentThread), so keep errno.
+bool HostThreadGone(const pthread_internal_t* record) {
+  const int32_t saved_errno = errno;
+  bool gone = syscall(__NR_tgkill, getpid(), record->tid, 0) == -1 && errno == ESRCH;
+  errno = saved_errno;
+  return gone;
+}
+
+// Caller holds g_glibc_host_pthreads_mutex. Returns the next entry.
+GlibcHostPthreadMap::iterator EraseIfUnused(GlibcHostPthreadMap::iterator it) {
   if (!it->second.exited || !it->second.released) {
-    return;
+    return std::next(it);
   }
   if (it->second.own) {
-    MunmapOrDie(it->first, AlignUpPageSize(sizeof(pthread_internal_t)));
+    auto* record = static_cast<pthread_internal_t*>(it->first);
+    if (!HostThreadGone(record)) {
+      return std::next(it);
+    }
+    MunmapOrDie(record->bionic_tls, AlignUpPageSize(sizeof(bionic_tls)));
+    MunmapOrDie(record, AlignUpPageSize(sizeof(pthread_internal_t)));
   }
-  GlibcHostPthreads().erase(it);
+  return GlibcHostPthreads().erase(it);
 }
 
 void AddGlibcHostPthread(void* record, pthread_t host, bool own, bool joinable) {
   std::lock_guard<std::mutex> lock(g_glibc_host_pthreads_mutex);
+  if (own) {
+    // Free the parked records of host threads that are gone.
+    for (auto it = GlibcHostPthreads().begin(); it != GlibcHostPthreads().end();) {
+      it = EraseIfUnused(it);
+    }
+  }
   GlibcHostPthreads()[record] = {host, own, false, !joinable};
+}
+
+// The record that the current host thread had in an earlier GuestThread, if any.
+void* TakeParkedGlibcHostPthread() {
+  pthread_t self = pthread_self();
+  pid_t tid = GettidSyscall();
+  std::lock_guard<std::mutex> lock(g_glibc_host_pthreads_mutex);
+  for (auto& [record, entry] : GlibcHostPthreads()) {
+    if (entry.own && entry.exited && pthread_equal(entry.host, self) &&
+        static_cast<pthread_internal_t*>(record)->tid == tid) {
+      entry.exited = false;
+      return record;
+    }
+  }
+  return nullptr;
 }
 
 void GlibcHostPthreadExited(void* record) {
@@ -287,11 +330,7 @@ void GuestThread::Destroy(GuestThread* thread) {
     }
   }
   if (thread->host_pthread_record_ != nullptr) {
-    auto* record = static_cast<pthread_internal_t*>(thread->host_pthread_record_);
-    if (thread->own_host_pthread_record_) {
-      MunmapOrDie(record->bionic_tls, AlignUpPageSize(sizeof(bionic_tls)));
-    }
-    GlibcHostPthreadExited(record);
+    GlibcHostPthreadExited(thread->host_pthread_record_);
   }
   // endregion
 #endif  // defined(__BIONIC__)
@@ -503,16 +542,21 @@ void* GuestThread::GetGlibcHostPthreadRecord() {
   if (host_pthread_record_ == nullptr) {
     void* record = GetTls()[TLS_SLOT_NATIVE_BRIDGE_GUEST_STATE];
     own_host_pthread_record_ = record == nullptr;
-    if (own_host_pthread_record_) {
-      auto* new_record = static_cast<pthread_internal_t*>(
-          MmapOrDie(AlignUpPageSize(sizeof(pthread_internal_t))));
-      new_record->tid = GettidSyscall();
-      new_record->bionic_tls =
-          static_cast<bionic_tls*>(MmapOrDie(AlignUpPageSize(sizeof(bionic_tls))));
-      record = new_record;
+    if (!own_host_pthread_record_) {
+      AddGlibcHostPthread(record, pthread_self(), false, joinable_guest_pthread_);
+    } else {
+      record = TakeParkedGlibcHostPthread();
+      if (record == nullptr) {
+        auto* new_record = static_cast<pthread_internal_t*>(
+            MmapOrDie(AlignUpPageSize(sizeof(pthread_internal_t))));
+        new_record->tid = GettidSyscall();
+        new_record->bionic_tls =
+            static_cast<bionic_tls*>(MmapOrDie(AlignUpPageSize(sizeof(bionic_tls))));
+        record = new_record;
+        AddGlibcHostPthread(record, pthread_self(), true, joinable_guest_pthread_);
+      }
     }
     host_pthread_record_ = record;
-    AddGlibcHostPthread(record, pthread_self(), own_host_pthread_record_, joinable_guest_pthread_);
   }
   return host_pthread_record_;
 #else
